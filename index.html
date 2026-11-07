@@ -180,6 +180,21 @@ footer .copy{padding-top:20px;font-size:.85rem}
 .modal dt{color:var(--muted)}
 .modal dd{font-weight:500;text-align:right}
 .modal .demo{font-size:.85rem;color:var(--muted);margin-bottom:18px}
+.payment-details{margin:18px 0;padding:16px;text-align:left;background:var(--paper);border:1px solid var(--line);border-radius:8px}
+.payment-details p{font-size:.9rem}
+.payment-details p+p{margin-top:8px;color:var(--muted)}
+.payment-amount{margin-top:12px;padding-top:12px;border-top:1px solid var(--line);font-weight:600}
+.payment-qr{width:min(280px,100%);max-height:340px;margin:14px auto 0;border:1px solid var(--line);border-radius:8px;background:var(--white);object-fit:contain}
+.payment-qr-caption{text-align:center!important;font-weight:600}
+.upload-field{margin:18px 0;text-align:left}
+.upload-field label{display:block;margin-bottom:8px;font-size:.9rem;font-weight:600}
+.upload-field input{width:100%;font-size:.85rem}
+.upload-hint,.upload-status{display:block;margin-top:6px;color:var(--muted);font-size:.8rem}
+.upload-status.error{color:#b3382c}
+.screenshot-preview{max-height:220px;margin:12px auto 0;border:1px solid var(--line);border-radius:8px;object-fit:contain}
+.modal-actions{display:grid;gap:10px}
+.modal-actions .btn-outline{color:var(--ink)}
+.modal [hidden]{display:none!important}
 
 /* ===== 11. Responsive (mobile-first: larger screens below) ===== */
 @media (min-width:640px){
@@ -478,16 +493,42 @@ footer .copy{padding-top:20px;font-size:.85rem}
 <!-- ===== Confirmation popup ===== -->
 <div class="overlay" id="overlay" role="dialog" aria-modal="true" aria-labelledby="mTitle">
   <div class="modal">
-    <div class="tick"><svg class="icon"><use href="#i-check"/></svg></div>
-    <h3 id="mTitle">Booking request ready</h3>
-    <dl>
-      <div><dt>Name</dt><dd id="m-name"></dd></div>
-      <div><dt>Service</dt><dd id="m-service"></dd></div>
-      <div><dt>Date</dt><dd id="m-date"></dd></div>
-      <div><dt>Time</dt><dd id="m-time"></dd></div>
-    </dl>
-    <p class="demo">This is a frontend demo. Your booking has not been saved or sent to the salon.</p>
-    <button class="btn btn-block" id="closeModal">Close</button>
+    <div id="bookingConfirmation">
+      <div class="tick"><svg class="icon"><use href="#i-check"/></svg></div>
+      <h3 id="mTitle">Booking request ready</h3>
+      <dl>
+        <div><dt>Name</dt><dd id="m-name"></dd></div>
+        <div><dt>Service</dt><dd id="m-service"></dd></div>
+        <div><dt>Date</dt><dd id="m-date"></dd></div>
+        <div><dt>Time</dt><dd id="m-time"></dd></div>
+      </dl>
+      <p class="demo">This is a frontend demo. Your booking has not been saved or sent to the salon.</p>
+      <div class="modal-actions">
+        <button class="btn btn-block" id="continuePayment">Continue to payment</button>
+        <button class="btn btn-outline btn-block" id="closeModal">Close</button>
+      </div>
+    </div>
+    <div id="paymentStep" aria-labelledby="paymentTitle" hidden>
+      <h3 id="paymentTitle">Payment</h3>
+      <div class="payment-details">
+        <p class="payment-qr-caption">PhonePe · Vishal Jents Parlour</p>
+        <p class="payment-amount">Amount due: <span id="paymentAmount"></span></p>
+        <img class="payment-qr" src="payment-qr.png" alt="PhonePe UPI payment QR code for Vishal Jents Parlour">
+        <p>Scan this QR code with your UPI app and pay the amount shown above.</p>
+      </div>
+      <div class="upload-field">
+        <label for="paymentScreenshot">Payment screenshot (optional)</label>
+        <input id="paymentScreenshot" type="file" accept="image/*" aria-describedby="uploadHint uploadStatus">
+        <span class="upload-hint" id="uploadHint">Choose a screenshot to preview it on this device. It will not be uploaded.</span>
+        <span class="upload-status" id="uploadStatus" role="status" aria-live="polite"></span>
+        <img class="screenshot-preview" id="screenshotPreview" alt="Selected payment screenshot preview" hidden>
+      </div>
+      <p class="demo">This demo does not process payments or send or save screenshots.</p>
+      <div class="modal-actions">
+        <button class="btn btn-block" id="finishPayment">Close</button>
+        <button class="btn btn-outline btn-block" id="backToBooking">Back to booking</button>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -505,6 +546,7 @@ const TIMES = ['09:00 AM','10:00 AM','11:00 AM','12:00 PM','01:00 PM','02:00 PM'
 /* ===== Helpers ===== */
 const $ = id => document.getElementById(id);
 const state = {service:'', date:'', time:''};
+let screenshotPreviewUrl = '';
 const formatPrice = price => `₹ ${price}`;
 const fmtDate = iso => new Date(iso + 'T00:00:00').toLocaleDateString('en-IN',{weekday:'short',day:'numeric',month:'short',year:'numeric'});
 const todayISO = () => { const d = new Date(); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().slice(0,10); };
@@ -584,14 +626,69 @@ $('bookingForm').addEventListener('submit', e => {
   $('m-service').textContent = $('service').value;
   $('m-date').textContent = fmtDate(state.date);
   $('m-time').textContent = state.time;
+  $('paymentAmount').textContent = formatPrice(SERVICES.find(s => s.name === $('service').value).price);
   $('overlay').classList.add('open'); $('closeModal').focus();
 });
 
 /* ===== Modal ===== */
+function clearScreenshotPreview() {
+  if (screenshotPreviewUrl) URL.revokeObjectURL(screenshotPreviewUrl);
+  screenshotPreviewUrl = '';
+  $('screenshotPreview').removeAttribute('src');
+  $('screenshotPreview').hidden = true;
+}
+
 function closeModal() {
   $('overlay').classList.remove('open');
-  $('bookingForm').reset(); state.date = state.time = ''; renderSlots(); updateSummary();
+  $('bookingConfirmation').hidden = false;
+  $('paymentStep').hidden = true;
+  $('overlay').setAttribute('aria-labelledby', 'mTitle');
+  $('bookingForm').reset(); $('paymentScreenshot').value = '';
+  clearScreenshotPreview();
+  $('uploadStatus').textContent = '';
+  $('uploadStatus').classList.remove('error');
+  $('paymentAmount').textContent = '';
+  state.date = state.time = ''; renderSlots(); updateSummary();
 }
+
+$('continuePayment').addEventListener('click', () => {
+  $('bookingConfirmation').hidden = true;
+  $('paymentStep').hidden = false;
+  $('overlay').setAttribute('aria-labelledby', 'paymentTitle');
+  $('paymentScreenshot').focus();
+});
+$('backToBooking').addEventListener('click', () => {
+  $('paymentStep').hidden = true;
+  $('bookingConfirmation').hidden = false;
+  $('overlay').setAttribute('aria-labelledby', 'mTitle');
+  $('continuePayment').focus();
+});
+$('finishPayment').addEventListener('click', closeModal);
+$('paymentScreenshot').addEventListener('change', e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  $('uploadStatus').classList.remove('error');
+  if (!file.type.startsWith('image/')) {
+    clearScreenshotPreview();
+    e.target.value = '';
+    $('uploadStatus').textContent = 'Choose an image file for the screenshot.';
+    $('uploadStatus').classList.add('error');
+    return;
+  }
+  if (file.size > 10 * 1024 * 1024) {
+    clearScreenshotPreview();
+    e.target.value = '';
+    $('uploadStatus').textContent = 'Choose an image smaller than 10 MB.';
+    $('uploadStatus').classList.add('error');
+    return;
+  }
+  clearScreenshotPreview();
+  screenshotPreviewUrl = URL.createObjectURL(file);
+  $('screenshotPreview').src = screenshotPreviewUrl;
+  $('screenshotPreview').hidden = false;
+  $('uploadStatus').textContent = 'Screenshot selected. Preview is only available on this device.';
+});
+
 $('closeModal').addEventListener('click', closeModal);
 $('overlay').addEventListener('click', e => { if (e.target === $('overlay')) closeModal(); });
 document.addEventListener('keydown', e => { if (e.key === 'Escape' && $('overlay').classList.contains('open')) closeModal(); });
