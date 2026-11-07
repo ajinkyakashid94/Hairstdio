@@ -106,6 +106,8 @@ h2{font-size:clamp(2rem,5vw,2.8rem)}
 .slot.selected{background:var(--black);border-color:var(--black);color:var(--gold)}
 .slot:disabled{color:#b5b2a8;background:var(--paper);text-decoration:line-through;cursor:not-allowed}
 .hint{color:var(--muted);font-size:.85rem}
+.form-status{min-height:1.5em;margin-bottom:12px;color:#b3382c;font-size:.88rem}
+.btn:disabled{opacity:.65;cursor:wait;transform:none}
 .summary{padding:28px;background:var(--black);color:var(--white);border-radius:var(--radius);align-self:start}
 .summary h3{font-size:1.7rem;color:var(--gold);margin-bottom:14px}
 .summary dl div{display:flex;justify-content:space-between;gap:12px;padding:10px 0;border-bottom:1px solid #2c2b27;font-size:.95rem}
@@ -390,6 +392,7 @@ footer .copy{padding-top:20px;font-size:.85rem}
           <div class="slots" id="slots"><p class="hint">Select a date to see available times.</p></div>
           <p class="error">Choose a time slot.</p>
         </div>
+        <p class="form-status" id="bookingStatus" role="status" aria-live="polite"></p>
         <button type="submit" class="btn btn-block">Confirm Booking</button>
       </form>
 
@@ -401,7 +404,7 @@ footer .copy{padding-top:20px;font-size:.85rem}
           <div><dt>Date</dt><dd id="s-date">Not selected</dd></div>
           <div><dt>Time</dt><dd id="s-time">Not selected</dd></div>
         </dl>
-        <p class="note">Demo only: this prototype does not send or save your booking anywhere.</p>
+        <p class="note">Your booking is saved when you confirm. Payment screenshots stay on this device.</p>
       </aside>
     </div>
   </div>
@@ -495,14 +498,14 @@ footer .copy{padding-top:20px;font-size:.85rem}
   <div class="modal">
     <div id="bookingConfirmation">
       <div class="tick"><svg class="icon"><use href="#i-check"/></svg></div>
-      <h3 id="mTitle">Booking request ready</h3>
+      <h3 id="mTitle">Booking confirmed</h3>
       <dl>
         <div><dt>Name</dt><dd id="m-name"></dd></div>
         <div><dt>Service</dt><dd id="m-service"></dd></div>
         <div><dt>Date</dt><dd id="m-date"></dd></div>
         <div><dt>Time</dt><dd id="m-time"></dd></div>
       </dl>
-      <p class="demo">This is a frontend demo. Your booking has not been saved or sent to the salon.</p>
+      <p class="demo">Your booking has been saved. Please pay at the salon; online payment is not processed here.</p>
       <div class="modal-actions">
         <button class="btn btn-block" id="continuePayment">Continue to payment</button>
         <button class="btn btn-outline btn-block" id="closeModal">Close</button>
@@ -537,19 +540,47 @@ footer .copy{padding-top:20px;font-size:.85rem}
 const SERVICES = [
   {name:'Hair Cutting', icon:'i-scissors', price:70, desc:'A clean, classic cut with a neat finish.'},
   {name:'Beard Trimming (Dadhi)', icon:'i-beard', price:50, desc:'Shaping and lining for a sharp, tidy beard.'},
+  {name:'Hair Cutting + Beard Trimming', icon:'i-scissors', price:150, desc:'A fresh haircut and a neatly trimmed beard in one visit.'},
   {name:'Hair Dye', icon:'i-sparkle', price:70, desc:'Refresh your look with a rich, even hair color.'},
   {name:'Massage', icon:'i-combo', price:70, desc:'Relax and unwind with a soothing massage.'},
   {name:'Face Mask', icon:'i-kid', price:100, desc:'A refreshing face mask for a clean, cared-for feel.'}
 ];
-const TIMES = ['09:00 AM','10:00 AM','11:00 AM','12:00 PM','01:00 PM','02:00 PM','03:00 PM','04:00 PM','05:00 PM','06:00 PM','07:00 PM'];
+const TIMES = Array.from({length:21}, (_, i) => {
+  const totalMinutes = 9 * 60 + i * 30;
+  const hour = Math.floor(totalMinutes / 60);
+  return `${String(hour % 12 || 12).padStart(2, '0')}:${String(totalMinutes % 60).padStart(2, '0')} ${hour < 12 ? 'AM' : 'PM'}`;
+});
 
 /* ===== Helpers ===== */
 const $ = id => document.getElementById(id);
+const SUPABASE_URL = 'https://lmmtkmctmuuhldbkhyak.supabase.co';
+const SUPABASE_ANON_KEY = 'sb_publishable_CFUoLvjNRDBFEnOFWwvM1A_SvZmk9RY';
+const isSupabaseConfigured = () =>
+  SUPABASE_URL.startsWith('https://') &&
+  SUPABASE_ANON_KEY.startsWith('sb_publishable_');
 const state = {service:'', date:'', time:''};
 let screenshotPreviewUrl = '';
+let slotRequest = 0;
 const formatPrice = price => `₹ ${price}`;
 const fmtDate = iso => new Date(iso + 'T00:00:00').toLocaleDateString('en-IN',{weekday:'short',day:'numeric',month:'short',year:'numeric'});
 const todayISO = () => { const d = new Date(); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().slice(0,10); };
+
+async function supabaseRequest(path, options = {}) {
+  const response = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+    ...options,
+    headers: {
+      apikey: SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+      'Content-Type': 'application/json',
+      ...options.headers
+    }
+  });
+  if (!response.ok) {
+    const details = await response.text();
+    throw new Error(details || `Supabase request failed (${response.status}).`);
+  }
+  return response;
+}
 
 /* ===== Build service cards + dropdown ===== */
 SERVICES.forEach((s, i) => {
@@ -572,18 +603,39 @@ $('serviceGrid').addEventListener('click', e => {
   setTimeout(() => $('name').focus({preventScroll:true}), 600);
 });
 
-/* ===== Time slots (demo availability: some slots are marked as taken based on the date) ===== */
-function renderSlots() {
+/* ===== Time slots ===== */
+async function renderSlots() {
   const wrap = $('slots'); state.time = '';
+  const requestedDate = state.date;
+  const requestId = ++slotRequest;
   if (!state.date) { wrap.innerHTML = '<p class="hint">Select a date to see available times.</p>'; return; }
-  const seed = Number(state.date.replaceAll('-','')); const now = new Date(); const isToday = state.date === todayISO();
+  if (!isSupabaseConfigured()) {
+    wrap.innerHTML = '<p class="hint">Add your Supabase project URL and public key to enable bookings.</p>';
+    return;
+  }
+  wrap.innerHTML = '<p class="hint">Checking available times...</p>';
+  let bookedTimes;
+  try {
+    const response = await supabaseRequest('rpc/booking_availability', {
+      method: 'POST',
+      body: JSON.stringify({selected_date: requestedDate})
+    });
+    bookedTimes = new Set((await response.json()).map(booking => booking.appointment_time));
+  } catch (error) {
+    console.error('Could not load booking availability:', error);
+    if (requestId === slotRequest) wrap.innerHTML = '<p class="hint">Supabase setup is not active yet. Run supabase-setup.sql in the SQL Editor for this project, then try again.</p>';
+    return;
+  }
+  if (requestId !== slotRequest || requestedDate !== state.date) return;
+  const now = new Date(); const isToday = requestedDate === todayISO();
   wrap.innerHTML = '';
-  TIMES.forEach((t, i) => {
-    const [h, rest] = t.split(':'); let hr = Number(h) % 12 + (t.includes('PM') ? 12 : 0);
-    const past = isToday && hr <= now.getHours();
-    const taken = (seed * (i + 3)) % 5 === 0;           // fake "booked" slots for the demo
+  TIMES.forEach(t => {
+    const [time, period] = t.split(' ');
+    const [hour, minute] = time.split(':').map(Number);
+    const slotMinutes = (hour % 12 + (period === 'PM' ? 12 : 0)) * 60 + minute;
+    const past = isToday && slotMinutes <= now.getHours() * 60 + now.getMinutes();
     const btn = document.createElement('button');
-    btn.type = 'button'; btn.className = 'slot'; btn.textContent = t; btn.disabled = past || taken;
+    btn.type = 'button'; btn.className = 'slot'; btn.textContent = t; btn.disabled = past || bookedTimes.has(t);
     btn.addEventListener('click', () => {
       wrap.querySelectorAll('.slot').forEach(s => s.classList.remove('selected'));
       btn.classList.add('selected'); state.time = t; clearError('f-time'); updateSummary();
@@ -611,7 +663,7 @@ $('service').addEventListener('change', () => { clearError('f-service'); updateS
 $('name').addEventListener('input', () => clearError('f-name'));
 $('mobile').addEventListener('input', e => { e.target.value = e.target.value.replace(/\D/g,''); clearError('f-mobile'); });
 
-$('bookingForm').addEventListener('submit', e => {
+$('bookingForm').addEventListener('submit', async e => {
   e.preventDefault();
   let ok = true;
   const check = (cond, id) => { if (!cond) { setError(id); ok = false; } };
@@ -622,12 +674,48 @@ $('bookingForm').addEventListener('submit', e => {
   check(state.time, 'f-time');
   if (!ok) { document.querySelector('.invalid input, .invalid select, .invalid .slot:not(:disabled)')?.focus(); return; }
 
+  const service = SERVICES.find(s => s.name === $('service').value);
+  const submitButton = $('bookingForm').querySelector('[type="submit"]');
+  $('bookingStatus').textContent = '';
+  submitButton.disabled = true;
+  submitButton.textContent = 'Saving booking...';
+  try {
+    if (!isSupabaseConfigured()) throw new Error('Supabase is not configured. Add your project URL and public key.');
+    await supabaseRequest('rpc/create_booking', {
+      method: 'POST',
+      headers: {Prefer: 'return=minimal'},
+      body: JSON.stringify({
+        customer_name: $('name').value.trim(),
+        mobile: $('mobile').value,
+        selected_service: service.name,
+        selected_date: state.date,
+        selected_time: state.time
+      })
+    });
+  } catch (error) {
+    console.error('Could not save booking:', error);
+    const slotWasTaken = error.message.includes('23505');
+    $('bookingStatus').textContent = slotWasTaken
+      ? 'That time was just booked. Please choose another available slot.'
+      : 'Could not save your booking. Check the Supabase setup and try again.';
+    if (slotWasTaken) {
+      await renderSlots();
+      setError('f-time');
+      updateSummary();
+    }
+    submitButton.disabled = false;
+    submitButton.textContent = 'Confirm Booking';
+    return;
+  }
+
   $('m-name').textContent = $('name').value.trim();
-  $('m-service').textContent = $('service').value;
+  $('m-service').textContent = service.name;
   $('m-date').textContent = fmtDate(state.date);
   $('m-time').textContent = state.time;
-  $('paymentAmount').textContent = formatPrice(SERVICES.find(s => s.name === $('service').value).price);
+  $('paymentAmount').textContent = formatPrice(service.price);
   $('overlay').classList.add('open'); $('closeModal').focus();
+  submitButton.disabled = false;
+  submitButton.textContent = 'Confirm Booking';
 });
 
 /* ===== Modal ===== */
